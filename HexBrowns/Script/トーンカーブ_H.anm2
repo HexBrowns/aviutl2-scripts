@@ -1,0 +1,126 @@
+--information:トーンカーブ_H v1.00 by HexBrowns
+--label:HexScript
+--filter
+--track@curve_rgb:RGB[0-255],0,255,0,1
+--track@curve_r:R[0-255],0,255,0,1
+--track@curve_g:G[0-255],0,255,0,1
+--track@curve_b:B[0-255],0,255,0,1
+
+--[[
+トーンカーブ_H v1.00
+
+トラックバーの移動（直線移動(時間制御) など）の形をそのままトーンカーブにする。
+入力 i/255 をオブジェクト内の時刻に読み替え、その時刻のトラックの値を出力にする。
+横軸がカーブの入力、縦軸が出力（0〜255）。4 本とも「移動無し」なら何もしない。
+移動無しのトラックは恒等（そのチャンネルは変えない）。
+RGB のカーブを通してから R / G / B それぞれのカーブを通す。
+
+元にしたもの
+  Script/トーンカーブ(時間制御).anm2（この環境の版。git の初回コミット 2026-07-26 から変更なし）。
+  カタログ上は こんにゃくねこ（@CatWithNeko）の Tonecurve_C 2025.11.02、ライセンス CC0-1.0。
+  カタログの Tonecurve_C.anm2 と中身が同じかは確かめていない。
+  原作は残してある（同じ UI の別名フォーク）。
+
+原作から変えたこと
+  - 画素の処理を Lua の getpixeldata / putpixeldata（8bit・CPU）から pixelshader（float・GPU）にした
+  - LUT を 8bit に切り捨てず float のまま持ち、シェーダーで隣の値と線形補間する
+  - 乗算済みアルファを外してからカーブを掛け、掛け戻す。アルファは 1 ビットも変えない
+    （原作は getpixeldata でアルファも 8bit に丸まる）
+  - 0 未満・1 を超える値を切らない。0..1 の外は、カーブの端の値から傾き 1 で延ばす
+    （恒等カーブなら入力のまま出る。端の傾きで延ばすと、端が急なカーブで明部が何倍にも
+    跳ねるので使わない）
+  - フィルタオブジェクトに対応（--filter）。1 パスの pixelshader だけなのでサイズは変えない
+
+原作と同じにしてあること（過去のプロジェクトを effect.name の書き換えだけで乗り換えるため）
+  - 項目名 RGB[0-255] / R[0-255] / G[0-255] / B[0-255]、最小 0・最大 255・既定 0・移動単位 1。
+    項目名が .aup2 の保存キーなので、1 文字でも変えると保存済みのカーブが恒等に戻る
+  - LUT の時刻の式（原作 16 行 (obj.totaltime - 1/obj.framerate) * (i/255)）と、0..255 への切り詰め
+  - 合成の順序（原作 mix_lut の lutY[ lutX[i] ] = チャンネルのカーブ(RGB のカーブ(x))）
+
+※このファイルのコメントとシェーダーの中に、角括弧 2 つの閉じ（配列の添字の入れ子など）を
+  続けて書かないこと。ブロックコメントとシェーダーの定義がそこで閉じる。
+
+移動単位を 1 のままにした理由
+  - 宣言が原作と 1 文字も違わなければ、保存値（例 0,255,直線移動(時間制御),4|...）の読み方も同じになる。
+    0.01 にしたときにホストが整数の保存値を同じ値として読むかは確かめていない
+  - LUT の精度は移動単位ではなく、移動中の値を obj.getvalue がどう返すかで決まる。第三者の
+    多角形モーフ_F.obj2 は移動単位 1 のトラック（頂点数）の移動中の値の小数部をモーフの進み具合に
+    使っているので、移動中の値は移動単位に丸められていないとみている（推測。時刻を指定した
+    obj.getvalue も同じかは検証 TCV-03 で確かめる）。丸められていても、シェーダーが隣の値と
+    線形補間するので原作よりは段が残る（机上の見積もりで 2 段重ねの段数 原作 17 / 丸めあり 58 /
+    丸めなし 153）
+
+毎フレーム 4 本 x 256 回の obj.getvalue を呼ぶのは原作と同じ。カーブはトラックの編集で
+いつでも変わり、安く変化を見分ける方法が無いので、キャッシュしない。
+
+検証: AI/scripts/トーンカーブ_H/verify_tonecurve.py（机上）/ AI/tools/debug_items/tcv.py（実機の節 TCV）
+issue: AI/scripts/issues/20260915_tonecurve_timecontrol_8bit_cpu.md
+]]
+
+--[[pixelshader@ps_tonecurve_h:
+Texture2D src : register(t0);
+SamplerState smp : register(s0);
+cbuffer constant0 : register(b0) {
+    float4 lut[256];    // lut[i] = 入力 i/255 に対する出力（0..1）。x=R / y=G / z=B / w=RGB
+};
+
+// x に対する 4 本のカーブの出力をまとめて引く。0..1 の間は隣り合う 2 点を線形補間する。
+// 0..1 の外は端の値から傾き 1 で延ばす（恒等カーブなら入力のまま）。
+float4 lut_at(float x) {
+    float xc = saturate(x);
+    float idx = xc * 255.0;
+    float i0 = min(floor(idx), 254.0);
+    int k = (int)i0;
+    float4 a = lut[k];
+    float4 b = lut[k + 1];
+    float4 v = a + (b - a) * (idx - i0);
+    return v + (x - xc);
+}
+
+float4 ps_tonecurve_h(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    float4 c = src.Sample(smp, uv);
+    if (c.a <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    // 乗算済みアルファを外す（ストレートの色にカーブを掛ける）
+    float3 s = c.rgb / c.a;
+    // RGB のカーブを通してから各チャンネルのカーブ（原作 mix_lut と同じ順）
+    float yr = lut_at(s.r).w;
+    float yg = lut_at(s.g).w;
+    float yb = lut_at(s.b).w;
+    float3 o = float3(lut_at(yr).x, lut_at(yg).y, lut_at(yb).z);
+    return float4(o * c.a, c.a);
+}
+]]
+
+-- float4 lut[i] の成分の並び。x=R / y=G / z=B / w=RGB
+local TRACKS = { "curve_r", "curve_g", "curve_b", "curve_rgb" }
+
+local modes = {}
+local moving = false
+for c = 1, 4 do
+  modes[c] = obj.getoption("track_mode", TRACKS[c])
+  if modes[c] ~= 0 then moving = true end
+end
+-- 4 本とも移動無しなら恒等。シェーダーを呼ばずに戻る
+if not moving then return end
+
+-- 入力 i/255 をオブジェクト内の時刻に読み替える（原作 16 行と同じ式）
+local span = obj.totaltime - (1 / obj.framerate)
+local lut = {}
+for c = 1, 4 do
+  if modes[c] == 0 then
+    -- 移動無しは恒等（原作 10 行）
+    for i = 0, 255 do
+      lut[i * 4 + c] = i / 255
+    end
+  else
+    local key = "track." .. TRACKS[c]
+    for i = 0, 255 do
+      local v = obj.getvalue(key, span * (i / 255))
+      lut[i * 4 + c] = math.min(math.max(v, 0), 255) / 255
+    end
+  end
+end
+
+obj.pixelshader("ps_tonecurve_h", "object", { "object" }, lut)

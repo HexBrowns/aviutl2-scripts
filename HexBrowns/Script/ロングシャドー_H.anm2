@@ -1,0 +1,377 @@
+--information:ロングシャドー_H v2.2 by HexBrowns
+--label:HexScript
+--filter
+
+--group:シャドウ
+--track@length:長さ,0,4000,200,1
+--track@angle:角度,-1280,1280,0,1
+--track@alpha:不透明度,0,1,1,0.01
+--color@color_start:開始色,0xffffff
+--check@use_grad:グラデーション,1
+--color@color_end:終了色,0x000000
+--check@fade_by_dist:距離で透明,0
+
+--group:拡散・収束
+--track@edge_top:上辺,-80,80,0,0.1
+--track@edge_bottom:下辺,-80,80,0,0.1
+--check@edge_symmetric:角度対称,0
+
+--group:エッジぼかし
+--track@blur:ぼかし,0,100,0,0.01
+--select@blur_dist:分布=1,矩形分布=0,三角分布=1,ガウス分布=2
+
+--group:オプション
+--check@shadow_only:影のみ,0
+--check@fix_rotate:回転を補正,1
+--check@flat:フラット,0
+--group:
+
+--[[pixelshader@ps_longshadow:
+Texture2D InputTexture : register(t0);
+
+cbuffer constant0 : register(b0) {
+    float l;
+    float alpha;
+    float trp;
+    float mode;
+    float2 dir;
+    float2 n;
+    float2 center;
+    float half_w;
+    float ns;
+    float nphi;
+    float edge_a;
+    float edge_b;
+    float tex_w;
+    float tex_h;
+    float _pad0;
+    float3 c1;
+    float _pad1;
+    float3 c2;
+    float _pad2;
+};
+
+float4 ps_longshadow(float4 pos : SV_Position) : SV_Target {
+    float4 base = InputTexture[uint2(pos.xy)];
+    float4 result = base;
+    int nstep = (int)ns;
+    if (nstep <= 0 || l <= 0.0) {
+        return result;
+    }
+
+    int tw = (int)tex_w;
+    int th = (int)tex_h;
+    float inv_l = 1.0 / max(l, 1e-3);
+
+    // mode < 0.5: 角度ファン（拡散・0）。各特徴が dir 中心の扇を持ち回転に剛体追従
+    // mode >= 0.5: アフィン掃引（負角＝収束）。edge_a/b は s_top/s_bot
+    if (mode < 0.5) {
+        int nph = (int)nphi;
+        if (nph < 1) {
+            nph = 1;
+        }
+        float base_ang = atan2(dir.y, dir.x);
+        // 上辺（edge_a）は +n の側。n は dir を -90 度回した向き（Angle=0 で画面の上）なので、
+        // 上辺は角度を減らす側、下辺は増やす側へ開く。v2.1 は逆で、拡散だけ上辺が画面の下を開いていた
+        float lo = radians(-edge_a);
+        float hi = radians(edge_b);
+        for (int i = 1; i <= nstep; i++) {
+            float d = (float)i;
+            float t = d * inv_l;
+            for (int p = 0; p <= nph; p++) {
+                float u = (float)p / (float)nph;
+                float ph = base_ang + lerp(lo, hi, u);
+                float2 ray = float2(cos(ph), sin(ph));
+                int2 ip = int2(floor(pos.xy - ray * d + 0.5));
+                if (ip.x < 0 || ip.y < 0 || ip.x >= tw || ip.y >= th) {
+                    continue;
+                }
+                float4 sample = InputTexture[uint2(ip)];
+                if (sample.a > 0.01) {
+                    float3 grad = lerp(c1, c2, t);
+                    float aa = (trp > 0.5) ? ((1.0 - t) * alpha) : alpha;
+                    return float4(grad * aa, aa);
+                }
+            }
+        }
+        return result;
+    }
+
+    float2 rel = pos.xy - center;
+    float a = dot(rel, dir);
+    float b = dot(rel, n);
+    float inv_hw2 = 0.5 / max(half_w, 1e-3);
+    float st = edge_a;
+    float sb = edge_b;
+
+    for (int i = 1; i <= nstep; i++) {
+        float t = (float)i / (float)nstep;
+        float k = 1.0 + (st + sb) * t * inv_hw2;
+        if (k < 1e-3) {
+            break;
+        }
+        float m = 0.5 * (st - sb) * t;
+        float2 src = center + dir * (a - l * t) + n * ((b - m) / k);
+        int2 ip = int2(floor(src + 0.5));
+        if (ip.x < 0 || ip.y < 0 || ip.x >= tw || ip.y >= th) {
+            continue;
+        }
+        float4 sample = InputTexture[uint2(ip)];
+        if (sample.a > 0.01) {
+            float3 grad = lerp(c1, c2, t);
+            float aa = (trp > 0.5) ? ((1.0 - t) * alpha) : alpha;
+            return float4(grad * aa, aa);
+        }
+    }
+    return result;
+}
+]]
+
+--[[pixelshader@ps_longshadow_mix:
+Texture2D t0 : register(t0);
+Texture2D t1 : register(t1);
+
+cbuffer constant0 : register(b0) {
+    float2 offset;
+};
+
+float4 ps_longshadow_mix(float4 pos : SV_Position) : SV_Target {
+    float4 c0 = t0[uint2(pos.xy)];
+    float4 c1 = t1[uint2(pos.xy - offset)];
+    if (pos.x < offset.x || pos.y < offset.y) {
+        return c0;
+    }
+    return float4(c0 * (1.0 - c1.a) + c1);
+}
+]]
+
+local length = length or 0
+local blur = blur or 0
+if length <= 0 then
+  return
+end
+
+local is_grad = (use_grad == 1 or use_grad == true)
+local is_fade = (fade_by_dist == 1 or fade_by_dist == true)
+local is_sym = (edge_symmetric == 1 or edge_symmetric == true)
+local is_shadow_only = (shadow_only == 1 or shadow_only == true)
+local is_fix_rot = (fix_rotate == 1 or fix_rotate == true)
+local is_flat = (flat == 1 or flat == true)
+
+obj.copybuffer("cache:_longshadow_h_org", "obj")
+
+local c1 = color_start
+local c2 = color_end
+if not is_grad then
+  c2 = c1
+end
+local r1, g1, b1 = RGB(c1)
+local r2, g2, b2 = RGB(c2)
+
+local ang = angle
+if is_fix_rot then
+  ang = angle - obj.rz
+end
+local rad = math.rad(ang)
+local dx = math.cos(rad)
+local dy = math.sin(rad)
+-- Angle=0 で n=(0,-1)=画面上。上辺の外側は +n
+local nx = math.sin(rad)
+local ny = -math.cos(rad)
+
+local et = math.max(-80, math.min(80, edge_top or 0))
+local eb = math.max(-80, math.min(80, edge_bottom or 0))
+if is_sym then
+  eb = et
+end
+
+local len = math.max(0, length)
+local has_spread = (math.abs(et) > 1e-6) or (math.abs(eb) > 1e-6)
+-- 負角を含むときは逆台形用アフィン、それ以外は角度ファン（回転に剛体追従）
+local use_affine = (et < -1e-6) or (eb < -1e-6)
+
+local orig_w, orig_h = obj.w, obj.h
+if orig_w < 1 or orig_h < 1 then
+  return
+end
+
+local max_w, max_h = obj.getinfo("image_max")
+if type(max_w) ~= "number" or max_w < 1 then max_w = 16384 end
+if type(max_h) ~= "number" or max_h < 1 then max_h = 16384 end
+
+local hw0, hh0 = orig_w * 0.5, orig_h * 0.5
+local corners = {
+  {-hw0, -hh0}, {hw0, -hh0}, {hw0, hh0}, {-hw0, hh0},
+}
+local min_x, max_x = -hw0, hw0
+local min_y, max_y = -hh0, hh0
+
+local half_w = 0.5 * (math.abs(nx) * orig_w + math.abs(ny) * orig_h)
+if half_w < 1 then
+  half_w = 1
+end
+local s_top = len * math.tan(math.rad(et))
+local s_bot = len * math.tan(math.rad(eb))
+
+local function aabb_include(x, y)
+  if x < min_x then min_x = x end
+  if x > max_x then max_x = x end
+  if y < min_y then min_y = y end
+  if y > max_y then max_y = y end
+end
+
+if use_affine then
+  local k1 = 1.0 + (s_top + s_bot) / (2.0 * half_w)
+  local m1 = 0.5 * (s_top - s_bot)
+  if k1 > 64 then k1 = 64 elseif k1 < -64 then k1 = -64 end
+  for i = 1, 4 do
+    local cx, cy = corners[i][1], corners[i][2]
+    local a = cx * dx + cy * dy
+    local bb = cx * nx + cy * ny
+    local a2 = a + len
+    local b2 = bb * k1 + m1
+    aabb_include(a2 * dx + b2 * nx, a2 * dy + b2 * ny)
+  end
+else
+  -- 扇の端・中心方向へ length 押し出し（上辺は角度を減らす側。シェーダーの lo / hi と同じ向き）
+  local lo = rad - math.rad(et)
+  local hi = rad + math.rad(eb)
+  local angles = {rad, lo, hi}
+  local two_pi = math.pi * 2
+  local function norm_a(a)
+    while a < -math.pi do a = a + two_pi end
+    while a > math.pi do a = a - two_pi end
+    return a
+  end
+  local lo_n, hi_n = norm_a(lo), norm_a(hi)
+  local span = hi - lo
+  if span < 0 then span = span + two_pi end
+  for _, axis in ipairs({0, math.pi * 0.5, math.pi, -math.pi * 0.5}) do
+    local d = norm_a(axis - lo_n)
+    if d < 0 then d = d + two_pi end
+    if d <= span + 1e-6 then
+      angles[#angles + 1] = axis
+    end
+  end
+  for _, ph in ipairs(angles) do
+    local ux, uy = math.cos(ph), math.sin(ph)
+    for i = 1, 4 do
+      local cx, cy = corners[i][1], corners[i][2]
+      aabb_include(cx + len * ux, cy + len * uy)
+    end
+  end
+end
+
+local left = math.max(0, math.ceil(-min_x - hw0))
+local right = math.max(0, math.ceil(max_x - hw0))
+local up = math.max(0, math.ceil(-min_y - hh0))
+local down = math.max(0, math.ceil(max_y - hh0))
+
+if blur > 0 then
+  local blur_pad = math.ceil(blur + 1)
+  left = left + blur_pad
+  right = right + blur_pad
+  up = up + blur_pad
+  down = down + blur_pad
+end
+
+-- CreateRenderTargetView(E_INVALIDARG) 防止
+local avail_w = math.max(0, math.floor(max_w - orig_w))
+local avail_h = math.max(0, math.floor(max_h - orig_h))
+local need_w = left + right
+local need_h = up + down
+local scale = 1
+if need_w > avail_w and need_w > 0 then
+  scale = math.min(scale, avail_w / need_w)
+end
+if need_h > avail_h and need_h > 0 then
+  scale = math.min(scale, avail_h / need_h)
+end
+if scale < 1 then
+  left = math.max(0, math.floor(left * scale))
+  right = math.max(0, math.floor(right * scale))
+  up = math.max(0, math.floor(up * scale))
+  down = math.max(0, math.floor(down * scale))
+  len = len * scale
+  s_top = s_top * scale
+  s_bot = s_bot * scale
+  while left + right > avail_w and (left > 0 or right > 0) do
+    if left >= right and left > 0 then left = left - 1 else right = math.max(0, right - 1) end
+  end
+  while up + down > avail_h and (up > 0 or down > 0) do
+    if up >= down and up > 0 then up = up - 1 else down = math.max(0, down - 1) end
+  end
+end
+
+if left > 0 or right > 0 or up > 0 or down > 0 then
+  obj.effect("領域拡張", "上", up, "下", down, "右", right, "左", left)
+end
+
+local center_x = left + orig_w * 0.5
+local center_y = up + orig_h * 0.5
+
+local nstep = math.max(1, math.ceil(len))
+local nphi = 1
+if has_spread and not use_affine then
+  local span_deg = math.abs(et) + math.abs(eb)
+  nphi = math.max(1, math.min(72, math.ceil(span_deg)))
+end
+if use_affine and has_spread then
+  local tan_m = math.max(math.abs(math.tan(math.rad(et))), math.abs(math.tan(math.rad(eb))))
+  local sub = math.max(1, math.min(4, math.ceil(tan_m)))
+  nstep = math.min(math.ceil(len * sub), 6000)
+end
+
+local trp_f = is_fade and 1 or 0
+local mode_f = use_affine and 1 or 0
+local edge_a = use_affine and s_top or et
+local edge_b = use_affine and s_bot or eb
+
+if len > 0 then
+  obj.pixelshader("ps_longshadow", "object", "object", {
+    len, alpha, trp_f, mode_f,
+    dx, dy, nx, ny,
+    center_x, center_y, half_w, nstep,
+    nphi, edge_a, edge_b, obj.w,
+    obj.h, 0, 0, 0,
+    r1 / 255, g1 / 255, b1 / 255, 0,
+    r2 / 255, g2 / 255, b2 / 255, 0,
+  })
+end
+
+-- フラットは拡散時スキップ（シルエット無視のため）
+if is_flat and len > 0 and not has_spread then
+  -- 原作 LongShadow（こんにゃくねこ, CC0）のフラット部分と同じ。原作者はこの部分を
+  -- Aodaruma 氏の FlatShadow (https://github.com/Aodaruma/FlatShadow) に影響を受けたと書いている
+  if obj.num > 1 then
+    obj.effect("グラデーション", "color", c1, "color2", c2, "角度", ang - 90, "幅", len)
+  else
+    if dy < 0 then
+      obj.effect("グラデーション", "color", c1, "color2", c2, "角度", 180, "幅", len, "中心Y", -dy * len / 4)
+    else
+      obj.effect("グラデーション", "color", c1, "color2", c2, "角度", 0, "幅", len, "中心Y", -dy * len / 4)
+    end
+  end
+end
+
+if blur > 0 then
+  local dist = math.min(math.max(math.floor(0.5 + (blur_dist or 1)), 0), 2)
+  local ok, basic_s = pcall(require, "Basic_S")
+  if ok and basic_s and basic_s.effect and basic_s.effect.prec_blur then
+    basic_s.effect.prec_blur(blur, blur, 0, true, dist)
+  else
+    local w_before, h_before = obj.w, obj.h
+    obj.effect("ぼかし", "範囲", blur)
+    left = left + (obj.w - w_before) * 0.5
+    right = right + (obj.w - w_before) * 0.5
+    up = up + (obj.h - h_before) * 0.5
+    down = down + (obj.h - h_before) * 0.5
+  end
+end
+
+if not is_shadow_only then
+  obj.pixelshader("ps_longshadow_mix", "object", {"object", "cache:_longshadow_h_org"}, {left, up})
+end
+
+obj.cx = obj.cx + (left - right) / 2
+obj.cy = obj.cy + (up - down) / 2
