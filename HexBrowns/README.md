@@ -1,7 +1,6 @@
 # HexBrowns による追加
 
-このフォークは こんにゃくねこ さんの [aviutl2-scripts](https://github.com/CatWithNeko/aviutl2-scripts) に、HexBrowns が改変したスクリプトを足したものです。
-元のファイルは変えていません。追加したファイルは、すべてこの `HexBrowns/` フォルダにあります。
+こんにゃくねこさんの [aviutl2-scripts](https://github.com/CatWithNeko/aviutl2-scripts) をフォークしたものです。
 
 | ファイル | 内容 | 説明書 |
 |---|---|---|
@@ -10,11 +9,11 @@
 
 ## 導入
 
-`Script/` の中身を、AviUtl2 の `Script` フォルダ（既定は `C:\ProgramData\aviutl2\Script`）へコピーして、AviUtl2 を起動し直します。
-元のスクリプトとは別の名前なので、並べて置けます。
+使用したいスクリプトを `Script` から取り出し、AviUtl2 の `Script` フォルダへコピーして、AviUtl2を起動します。
+元のスクリプトとは名称が違うため競合の心配は不要です。
 
 ## ライセンス
 
-CC0-1.0（このリポジトリの `LICENSE` と同じ）
+CC0-1.0
 
-HexBrowns のほかのスクリプトは [HexBrowns/HexScript](https://github.com/HexBrowns/HexScript) にあります。
+他のスクリプトは [HexBrowns/HexScript](https://github.com/HexBrowns/HexScript) にあります。
